@@ -19,7 +19,7 @@ contract PuppyRaffle is ERC721, Ownable {
     using Address for address payable;
 
     uint256 public immutable entranceFee;
-
+    
     address[] public players;
     uint256 public raffleDuration;
     uint256 public raffleStartTime;
@@ -83,7 +83,7 @@ contract PuppyRaffle is ERC721, Ownable {
         }
 
         // Check for duplicates
-        for (uint256 i = 0; i < players.length - 1; i++) {
+        for (uint256 i = 0; i < players.length - 1; i++) { //@audit seems like an inefficient way to check for duplicates
             for (uint256 j = i + 1; j < players.length; j++) {
                 require(players[i] != players[j], "PuppyRaffle: Duplicate player");
             }
@@ -93,6 +93,8 @@ contract PuppyRaffle is ERC721, Ownable {
 
     /// @param playerIndex the index of the player to refund. You can find it externally by calling `getActivePlayerIndex`
     /// @dev This function will allow there to be blank spots in the array
+
+    
     function refund(uint256 playerIndex) public {
         address playerAddress = players[playerIndex];
         require(playerAddress == msg.sender, "PuppyRaffle: Only the player can refund");
@@ -100,7 +102,7 @@ contract PuppyRaffle is ERC721, Ownable {
 
         payable(msg.sender).sendValue(entranceFee);
 
-        players[playerIndex] = address(0);
+        players[playerIndex] = address(0); //@audit - note when a player is refunded they keep their place in the array, conttributing to array length.
         emit RaffleRefunded(playerAddress);
     }
 
@@ -124,37 +126,40 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @dev we send 80% of the funds to the winner, the other 20% goes to the feeAddress
     function selectWinner() external {
         require(block.timestamp >= raffleStartTime + raffleDuration, "PuppyRaffle: Raffle not over");
-        require(players.length >= 4, "PuppyRaffle: Need at least 4 players");
+        require(players.length >= 4, "PuppyRaffle: Need at least 4 players"); // @audit - this checks length of array, but not length of array excluding zero addresses (refunded entrants)
         uint256 winnerIndex =
-            uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, block.difficulty))) % players.length;
+            uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, block.difficulty))) % players.length; // I'm not sure this is actually random, we could use Chainlink VRF instead
         address winner = players[winnerIndex];
-        uint256 totalAmountCollected = players.length * entranceFee;
+        uint256 totalAmountCollected = players.length * entranceFee; // @audit - This will overcount if there are refunded players
         uint256 prizePool = (totalAmountCollected * 80) / 100;
         uint256 fee = (totalAmountCollected * 20) / 100;
         totalFees = totalFees + uint64(fee);
 
-        uint256 tokenId = totalSupply();
+        uint256 tokenId = totalSupply(); //@audit - should this be totalSupply() + 1?
 
         // We use a different RNG calculate from the winnerIndex to determine rarity
-        uint256 rarity = uint256(keccak256(abi.encodePacked(msg.sender, block.difficulty))) % 100;
-        if (rarity <= COMMON_RARITY) {
+        uint256 rarity = uint256(keccak256(abi.encodePacked(msg.sender, block.difficulty))) % 100; // @audit - not truly random - picks a random number between 0 and 99.
+        if (rarity <= COMMON_RARITY) { // @n x <= 70 then common
             tokenIdToRarity[tokenId] = COMMON_RARITY;
-        } else if (rarity <= COMMON_RARITY + RARE_RARITY) {
+        } else if (rarity <= COMMON_RARITY + RARE_RARITY) { //@n x between 71 and 95 then rare
             tokenIdToRarity[tokenId] = RARE_RARITY;
         } else {
-            tokenIdToRarity[tokenId] = LEGENDARY_RARITY;
+            tokenIdToRarity[tokenId] = LEGENDARY_RARITY; //@n x between 96 and 99 then legendary
         }
 
         delete players;
         raffleStartTime = block.timestamp;
         previousWinner = winner;
-        (bool success,) = winner.call{value: prizePool}("");
+        (bool success,) = winner.call{value: prizePool}("");  // @audit - is winner a payable address? if not, this will fail
+                                                              // @audit - prizePool may be too large if there are refunded players 
         require(success, "PuppyRaffle: Failed to send prize pool to winner");
         _safeMint(winner, tokenId);
     }
 
     /// @notice this function will withdraw the fees to the feeAddress
-    function withdrawFees() external {
+    // @audit -should this be external?
+    // @audit - who should be able to call this function?
+    function withdrawFees() external { 
         require(address(this).balance == uint256(totalFees), "PuppyRaffle: There are currently players active!");
         uint256 feesToWithdraw = totalFees;
         totalFees = 0;
