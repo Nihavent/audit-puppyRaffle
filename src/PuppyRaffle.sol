@@ -77,12 +77,17 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @notice duplicate entrants are not allowed
     /// @param newPlayers the list of players to enter the raffle
     function enterRaffle(address[] memory newPlayers) public payable {
+        // q - were custom reverts avaialble in this version of solidity?
+        // q - what if msg.value is zero?
+        // @audit - this should check if an addres entered is a zero address -  you cannot mint erc721 to a zero address    
         require(msg.value == entranceFee * newPlayers.length, "PuppyRaffle: Must send enough to enter raffle");
         for (uint256 i = 0; i < newPlayers.length; i++) {
+            // q what resets the players array?
             players.push(newPlayers[i]);
         }
 
         // Check for duplicates
+        // @audit DOS Attack
         for (uint256 i = 0; i < players.length - 1; i++) { //@audit seems like an inefficient way to check for duplicates
             for (uint256 j = i + 1; j < players.length; j++) {
                 require(players[i] != players[j], "PuppyRaffle: Duplicate player");
@@ -94,12 +99,15 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @param playerIndex the index of the player to refund. You can find it externally by calling `getActivePlayerIndex`
     /// @dev This function will allow there to be blank spots in the array
 
-    
+    // @audit - reentrancy vulnerability due to this function sending a balance before the player is removed from the array.
+    // @audit -   if the player is a contract, they can call this function and re-enter the raffle before they are removed from the array (using their fallback() or receive() function)
     function refund(uint256 playerIndex) public {
+        // @audit MEV
         address playerAddress = players[playerIndex];
         require(playerAddress == msg.sender, "PuppyRaffle: Only the player can refund");
         require(playerAddress != address(0), "PuppyRaffle: Player already refunded, or is not active");
 
+        //@audit - makes external call before updates state
         payable(msg.sender).sendValue(entranceFee);
 
         players[playerIndex] = address(0); //@audit - note when a player is refunded they keep their place in the array, conttributing to array length.
@@ -115,6 +123,8 @@ contract PuppyRaffle is ERC721, Ownable {
                 return i;
             }
         }
+        // q what if a player is at index 0?
+        // @audit if the player is at index 0, this returns 0 and a player might think they're not active.
         return 0;
     }
 
@@ -124,20 +134,29 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @dev we use a hash of on-chain data to generate the random numbers
     /// @dev we reset the active players array after the winner is selected
     /// @dev we send 80% of the funds to the winner, the other 20% goes to the feeAddress
+
+    // @audit - who calls this function? Should it by called by a Chainlink automated job?
     function selectWinner() external {
+        // q - are the raffle duration and start time being set correctly?
         require(block.timestamp >= raffleStartTime + raffleDuration, "PuppyRaffle: Raffle not over");
         require(players.length >= 4, "PuppyRaffle: Need at least 4 players"); // @audit - this checks length of array, but not length of array excluding zero addresses (refunded entrants)
+        
+        // @audit - weak RNG
         uint256 winnerIndex =
             uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, block.difficulty))) % players.length; // I'm not sure this is actually random, we could use Chainlink VRF instead
         address winner = players[winnerIndex];
         uint256 totalAmountCollected = players.length * entranceFee; // @audit - This will overcount if there are refunded players
         uint256 prizePool = (totalAmountCollected * 80) / 100;
         uint256 fee = (totalAmountCollected * 20) / 100;
+        //@audit - overflow when this value exceeds 2^64, with an entrance fee of 1e18, this will overflow after 2^64 / (0.2 * 1e18) ~ 93 players
+        // max value: 18446744073709551615
+        //@audit - unsafe cast of uint256 to uint64, will lose fees as soon as they exceed 18.4 ether.
         totalFees = totalFees + uint64(fee);
 
         uint256 tokenId = totalSupply(); //@audit - should this be totalSupply() + 1?
 
         // We use a different RNG calculate from the winnerIndex to determine rarity
+        //@audit - weak RNG
         uint256 rarity = uint256(keccak256(abi.encodePacked(msg.sender, block.difficulty))) % 100; // @audit - not truly random - picks a random number between 0 and 99.
         if (rarity <= COMMON_RARITY) { // @n x <= 70 then common
             tokenIdToRarity[tokenId] = COMMON_RARITY;
@@ -147,9 +166,12 @@ contract PuppyRaffle is ERC721, Ownable {
             tokenIdToRarity[tokenId] = LEGENDARY_RARITY; //@n x between 96 and 99 then legendary
         }
 
-        delete players;
+        delete players; // n - resets the players array
         raffleStartTime = block.timestamp;
         previousWinner = winner;
+
+        //@audit - can we reenter somewhere? ReEntrancy might be protected by this code: require(block.timestamp >= raffleStartTime + raffleDuration, "PuppyRaffle: Raffle not over");
+        //@audit - what would happen if the winner didn't have their fallback setup correctly?
         (bool success,) = winner.call{value: prizePool}("");  // @audit - is winner a payable address? if not, this will fail
                                                               // @audit - prizePool may be too large if there are refunded players 
         require(success, "PuppyRaffle: Failed to send prize pool to winner");
@@ -157,12 +179,16 @@ contract PuppyRaffle is ERC721, Ownable {
     }
 
     /// @notice this function will withdraw the fees to the feeAddress
-    // @audit -should this be external?
+    // @audit - should this be external?
     // @audit - who should be able to call this function?
     function withdrawFees() external { 
+        //q - if the protocol has players, someone can't withdraw fees?
+        //@audit - is it difficult to withdraw fees?
+        //@audit - mishandling ether can lead to a DoS attack, if someone can send funds to this contract without the totalFees variable being updated, then the contract will be unable to withdraw fees.
         require(address(this).balance == uint256(totalFees), "PuppyRaffle: There are currently players active!");
         uint256 feesToWithdraw = totalFees;
         totalFees = 0;
+        //@audit - what if the feeAddress is a smart contract with a fallback that will fail?
         (bool success,) = feeAddress.call{value: feesToWithdraw}("");
         require(success, "PuppyRaffle: Failed to withdraw fees");
     }
@@ -175,6 +201,7 @@ contract PuppyRaffle is ERC721, Ownable {
     }
 
     /// @notice this function will return true if the msg.sender is an active player
+    // @audit - is this function necessary?
     function _isActivePlayer() internal view returns (bool) {
         for (uint256 i = 0; i < players.length; i++) {
             if (players[i] == msg.sender) {
