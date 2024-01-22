@@ -8,6 +8,6 @@
 
 **Impact**
 
-**Proof of Concept** (proof of code)
+**Proof of Concept**
 
 **Recommended Mitigation**

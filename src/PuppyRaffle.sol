@@ -57,7 +57,7 @@ contract PuppyRaffle is ERC721, Ownable {
     string private constant LEGENDARY = "legendary";
 
     // Events
-    //@audit-info no indexed fields (Aderyn)
+    //@report-written no indexed fields (Aderyn)
     event RaffleEnter(address[] newPlayers);
     event RaffleRefunded(address player);
     event FeeAddressChanged(address newFeeAddress);
@@ -88,7 +88,7 @@ contract PuppyRaffle is ERC721, Ownable {
     function enterRaffle(address[] memory newPlayers) public payable {
         // q - were custom reverts avaialble in this version of solidity?
         // q - what if msg.value is zero?
-        // @audit - this should check if an address entered is a zero address -  you cannot mint erc721 to a zero address    
+        // @report-skipped - this should check if an address entered is a zero address -  you cannot mint erc721 to a zero address    
         // @report-written -gas use uint256 playerLength instead of players.length, as this is calling data from storage twice in this function 
         require(msg.value == entranceFee * newPlayers.length, "PuppyRaffle: Must send enough to enter raffle");
         for (uint256 i = 0; i < newPlayers.length; i++) {
@@ -98,12 +98,12 @@ contract PuppyRaffle is ERC721, Ownable {
 
         // Check for duplicates
         // @report-written DOS Attack
-        for (uint256 i = 0; i < players.length - 1; i++) { //@audit seems like an inefficient way to check for duplicates
+        for (uint256 i = 0; i < players.length - 1; i++) { 
             for (uint256 j = i + 1; j < players.length; j++) {
                 require(players[i] != players[j], "PuppyRaffle: Duplicate player");
             }
         }
-        //@audit - If an empty array is submitted this will emit an empty event
+        //@report-skipped - If an empty array is submitted this will emit an empty event
         emit RaffleEnter(newPlayers);
     }
 
@@ -112,9 +112,9 @@ contract PuppyRaffle is ERC721, Ownable {
 
     // @report-written - reentrancy vulnerability due to this function sending a balance before the player is removed from the array.
     // @report-written -   if the player is a contract, they can call this function and re-enter the raffle before they are removed from the array (using their fallback() or receive() function)
-    // @audit - if an address is changed to zero, can this address still win the raffle?
+    // @q - if an address is changed to zero, can this address still win the raffle?
     function refund(uint256 playerIndex) public {
-        // @audit MEV
+        // @report-skipped MEV
         address playerAddress = players[playerIndex];
         require(playerAddress == msg.sender, "PuppyRaffle: Only the player can refund");
         require(playerAddress != address(0), "PuppyRaffle: Player already refunded, or is not active");
@@ -122,7 +122,7 @@ contract PuppyRaffle is ERC721, Ownable {
         //@report-written- makes external call before updates state
         payable(msg.sender).sendValue(entranceFee);
 
-        players[playerIndex] = address(0); //@audit - note when a player is refunded they keep their place in the array, conttributing to array length.
+        players[playerIndex] = address(0); //@report-skipped - note when a player is refunded they keep their place in the array, conttributing to array length.
         //@report-written  event emitted after call
         emit RaffleRefunded(playerAddress);
     }
@@ -147,32 +147,33 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @dev we reset the active players array after the winner is selected
     /// @dev we send 80% of the funds to the winner, the other 20% goes to the feeAddress
 
-    // @audit - recommend to follow CEI
-    // @audit - who calls this function? Should it by called by a Chainlink automated job?
+    // @report-written - recommend to follow CEI
+    // @q - who calls this function? Should it by called by a Chainlink automated job?
     function selectWinner() external {
         // q - are the raffle duration and start time being set correctly?
         require(block.timestamp >= raffleStartTime + raffleDuration, "PuppyRaffle: Raffle not over");
-        require(players.length >= 4, "PuppyRaffle: Need at least 4 players"); // @audit - this checks length of array, but not length of array excluding zero addresses (refunded entrants)
+        require(players.length >= 4, "PuppyRaffle: Need at least 4 players"); // @report-skipped - this checks length of array, but not length of array excluding zero addresses (refunded entrants)
         
-        // @audit - weak RNG, fixes Chainlink VRF, Commit Reveal Scheme
-        // @audit - picks a winner from the players array, but the winner can still be a zero adress (either refunded player or entered zero address)
+        // @report-written - weak RNG, fixes Chainlink VRF, Commit Reveal Scheme
+        // @report-skipped - picks a winner from the players array, but the winner can still be a zero adress (either refunded player or entered zero address)
         uint256 winnerIndex =
             uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, block.difficulty))) % players.length; // I'm not sure this is actually random, we could use Chainlink VRF instead
         address winner = players[winnerIndex];
-        uint256 totalAmountCollected = players.length * entranceFee; // @audit - This will overcount if there are refunded players
-        //@audit - probably some precision loss here
-        //@audit-info magic numbers are bad practice
+        uint256 totalAmountCollected = players.length * entranceFee; // @report-skipped - This will overcount if there are refunded players
+        //@report-skipped - probably some precision loss here
+        //@report-written magic numbers are bad practice
         uint256 prizePool = (totalAmountCollected * 80) / 100;
         uint256 fee = (totalAmountCollected * 20) / 100;
-        //@audit - overflow when this value exceeds 2^64, with an entrance fee of 1e18, this will overflow after 2^64 / (0.2 * 1e18) ~ 93 players
+        //@report-written - overflow when this value exceeds 2^64, with an entrance fee of 1e18, this will overflow after 2^64 / (0.2 * 1e18) ~ 93 players
         // max value: 18446744073709551615
-        //@audit - unsafe cast of uint256 to uint64, will lose fees as soon as they exceed 18.4 ether.
+        //@report-written, included in overflow issue - unsafe cast of uint256 to uint64, will lose fees as soon as they exceed 18.4 ether.
         totalFees = totalFees + uint64(fee);
 
-        uint256 tokenId = totalSupply(); //@audit - should this be totalSupply() + 1?
+        uint256 tokenId = totalSupply(); //q - should this be totalSupply() + 1?
 
         // We use a different RNG calculate from the winnerIndex to determine rarity
-        //@audit - weak RNG
+        //@report-written - weak RNG
+        //@report-written - people can revert the TX till they get a legendary NFT.
         uint256 rarity = uint256(keccak256(abi.encodePacked(msg.sender, block.difficulty))) % 100; // @audit - not truly random - picks a random number between 0 and 99.
         if (rarity <= COMMON_RARITY) { // @n x <= 70 then common
             tokenIdToRarity[tokenId] = COMMON_RARITY;
@@ -186,23 +187,23 @@ contract PuppyRaffle is ERC721, Ownable {
         raffleStartTime = block.timestamp;
         previousWinner = winner;
 
-        //@audit - can we reenter somewhere? ReEntrancy might be protected by this code: require(block.timestamp >= raffleStartTime + raffleDuration, "PuppyRaffle: Raffle not over");
-        //@audit - what would happen if the winner didn't have their fallback setup correctly?
-        (bool success,) = winner.call{value: prizePool}("");  // @audit - is winner a payable address? if not, this will fail
-                                                              // @audit - prizePool may be too large if there are refunded players 
+        //n - ReEntrancy might be protected by this code: require(block.timestamp >= raffleStartTime + raffleDuration, "PuppyRaffle: Raffle not over");
+        //@report-written - what would happen if the winner didn't have their fallback setup correctly?
+        (bool success,) = winner.call{value: prizePool}("");  // @report-skipped - prizePool may be too large if there are refunded players 
         require(success, "PuppyRaffle: Failed to send prize pool to winner");
         _safeMint(winner, tokenId);
     }
 
     /// @notice this function will withdraw the fees to the feeAddress
-    // @audit - should this be external?
-    // @audit - who should be able to call this function?
+    // q - should this be external?
+    // q - who should be able to call this function?
     function withdrawFees() external { 
-        //@audit - mishandling ether can lead to a DoS attack, if someone can send funds to this contract without the totalFees variable being updated, then the contract will be unable to withdraw fees.
+        //@report-written under the integer overflow issue, ideally separate this out in competitive audit - mishandling ether can lead to a DoS attack, if someone can send funds to this contract without the totalFees variable being updated, then the contract will be unable to withdraw fees.
+        //@report-skipped, this line of code also enables griefing due to difficulty of withdrawing funds. ie, people enter raffle as soon as it opens so owner can never withdraw, or users forcing eth onto this contract via selfDestruct meaning nobody can withdraw
         require(address(this).balance == uint256(totalFees), "PuppyRaffle: There are currently players active!");
         uint256 feesToWithdraw = totalFees;
         totalFees = 0;
-        //@audit - what if the feeAddress is a smart contract with a fallback that will fail?
+        //q - what if the feeAddress is a smart contract with a fallback that will fail? For the purposes of this audit, lets assume that the feeAdress is always trusted and working
         //slither-disable-next-line arbitrary-send-eth
         (bool success,) = feeAddress.call{value: feesToWithdraw}("");
         require(success, "PuppyRaffle: Failed to withdraw fees");
@@ -211,14 +212,14 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @notice only the owner of the contract can change the feeAddress
     /// @param newFeeAddress the new address to send fees to
     function changeFeeAddress(address newFeeAddress) external onlyOwner {
-        //@audit-info check for zero address, input validation
+        //@report-written check for zero address, input validation
         feeAddress = newFeeAddress;
-        //@audit - are we missing events in other functions?
+        //@report-written - are we missing events in other functions?
         emit FeeAddressChanged(newFeeAddress);
     }
 
     /// @notice this function will return true if the msg.sender is an active player
-    // @audit - this isn't used anywaywhere, is it necessary?
+    // @report-written - this isn't used anywaywhere, is it necessary?
     function _isActivePlayer() internal view returns (bool) {
         for (uint256 i = 0; i < players.length; i++) {
             if (players[i] == msg.sender) {

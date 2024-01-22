@@ -16,5 +16,6 @@
 
 
 
--Slither / Aderyn
+-Slither 
+-Aderyn
 -Code quality/tests

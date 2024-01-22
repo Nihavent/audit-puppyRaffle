@@ -346,11 +346,53 @@ contract PuppyRaffleTest is Test {
 
         require(FeesAfterEightyNineEntrants < FeesAfterFourEntrants);
 
-        //800000000000000000
-        //18400000000000000000
-        //153255926290448384
+    }
+
+    function testRefundedPlayedWinsRaffleAndCannotMintNft() public playersEntered {
+
+        //Refund all four players in the raffle
+        vm.prank(playerOne);
+        puppyRaffle.refund(0);
+        
+        vm.prank(playerTwo);
+        puppyRaffle.refund(1);
+
+        vm.prank(playerThree);
+        puppyRaffle.refund(2);
+        
+        vm.prank(playerFour);
+        puppyRaffle.refund(3);
+
+        console.log("Player at index 0", puppyRaffle.players(0));
+        console.log("Player at index 1", puppyRaffle.players(1));
+        console.log("Player at index 2", puppyRaffle.players(2));
+        console.log("Player at index 3", puppyRaffle.players(3));
+
+        //There is currently no players in the raffle, lets pick a winner
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+        
+        //In order to not revert due to the contract not having enough funds, manually give the contract funds:
+        vm.deal(address(puppyRaffle), 4*entranceFee);
+
+        puppyRaffle.selectWinner();
+    }
+
+
+    function testRefundedPlayerResultsInIncorrectFeesAndPayout() public playersEntered {
+        //Refund a player
+        vm.prank(playerOne);
+        puppyRaffle.refund(0);
+        
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        //In the following function call, the contract will revert due to the contract not having enough funds to pay the winner
+        puppyRaffle.selectWinner();
     }
 }
+
+
 
 
 contract ReentrancyAttacker {

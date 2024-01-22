@@ -139,18 +139,257 @@ To prevent this, the `PuppyRaffle::refund` should update the `players` array pri
 
 Hashing `msg.sender`, `block.timestamp` and `block.difficulty` together creates a predictable final number. A predictable number is not a truly random number. Malicious users can manipulate these values in order to chose the winner of the raffle themselves.
 
+This occurs twice in the `PuppyRaffle::selectWinner` function, the first is to pick the winner of the raffle:
+
+```javascript
+        uint256 winnerIndex =
+            uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, block.difficulty))) % players.length;
+```
+
+The second is to pick the rarity of the NFT that gets minted:
+
+```javascript
+        uint256 rarity = uint256(keccak256(abi.encodePacked(msg.sender, block.difficulty))) % 100;
+```
+
+
+
 *Note:* This additionally means that users could front-run this function and call `refund` if they see they are not the winner.
 
 **Impact**
 
 Any user can influence the winner of the raffle, winning the money and selecting the rarity of the NFT. This could make the entire raffle worthless if it becomes a gas war as to who wins the raffles.
 
-**Proof of Concept** (proof of code)
+**Proof of Concept**
+
+1. Validators can know ahead of time the `block.timestamp` and `block.difficulty` and use that to predict when/how to participate. See the [solidity blog on prevrando](https://soliditydeveloper.com/prevrandao). `block.difficulty` was recently replaced with prevrandao. 
+2. Users can mine/manipulate their `msg.sender` value to result in their address being used to generate the winner!
+3. Users can revert their `selectWinner` transaction if they don't like the winner or resulting puppy.
+
+Using on-chain values as a randomness seed is a [well-documented attack vector](https://betterprogramming.pub/how-to-generate-truly-random-numbers-in-solidity-and-blockchain-9ced6472dbdf) in the blockchain space.
 
 **Recommended Mitigation**
 
+Consider using a cryptographically provable random number generator such as Chainlink VRF.
 
-### [M-#] Unbounded loop checking for duplicates in `PuppyRaffle::enterRaffle` is a potential denial of service (DOS) attack, incrementing gas costs for future entrants 
+
+
+### [H-3] Integer overflow of `PuppyRaffle::totalFees` loses fees
+
+**Description**
+
+In solidity versions prior to `0.8.0` integers were subject to integer overflows.
+
+```javascript
+uint64 myVar = type(uint64).max
+myVar = myVar + 1
+//myVar will be 0
+```
+
+**Impact**
+
+In `PuppyRaffle::selectWinner`, `totalFees` are accumulated for the `feeAddress` which can be later collected in `PuppyRaffle::withdrawFees`. However, if the `totalFees` variable overflows, the `feeAddress` may not collect the correct amount of fees, leaving fees permanently stuck in the contract.
+
+**Proof of Concept**
+
+Place the following code into `PuppyRaffleTest.t.sol`, it shows the `totalFees` variable overflowing and containing a lower value of totalFees after 93 entrants in the raffle compared to when there was 4 entrants in the raffle.
+
+1. We conclude a raffle with 4 players
+2. We then enter 89 players enter a new raffle, and conclude the raffle
+3. `totalFees` is lower after the 93rd player has entered the raffle than what it was after the 4th player had entered the raffle, due to an overflow of the `uint64` `totalFees` variable.
+4. You will not be able to withdraw, due to the line in `PuppyRaffle:withdraw`:
+   
+```javascript
+require(address(this).balance == uint256(totalFees), "PuppyRaffle: There are currently players active!");
+```
+
+Although you could use `selfdestruct` to send ETH to this contract in order for the values to match and withdraw the fees. Clearly this is not an intended use of the protocol.
+
+
+<details>
+<summary>Code</summary>
+
+```javascript
+    function testShowFeeOverflow() public playersEntered {
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        puppyRaffle.selectWinner();
+
+        uint256 FeesAfterFourEntrants = puppyRaffle.totalFees();
+        console.log("Current fees: ", puppyRaffle.totalFees());
+        console.log("previousWinner: ", puppyRaffle.previousWinner());
+
+        // To overflow the uint64 we need to have 2^64 + 1 - 800000000000000000 extra fees =1.7646744e+19
+        // each entrant pays 2e+17 in fees. So we need 89 entrants to overflow the uint64\
+        uint256 numPlayers = 89;
+        address[] memory players = new address[](numPlayers);
+        for (uint i = 0; i < numPlayers; i++) {
+            players[i] = address(i+1);
+        }
+    
+        //Enter the players
+        puppyRaffle.enterRaffle{value: entranceFee * players.length}(players);
+
+        //print out players array
+        //console.log(puppyRaffle.players(1));
+        for (uint i = 0; i < 4; i++) {
+            console.log(puppyRaffle.players(i));
+        }
+
+
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        puppyRaffle.selectWinner();
+
+        uint256 FeesAfterEightyNineEntrants = puppyRaffle.totalFees();
+
+        console.log("Current fees: ", puppyRaffle.totalFees());
+
+        require(FeesAfterEightyNineEntrants < FeesAfterFourEntrants);
+    }
+```
+
+</details>
+
+**Recommended Mitigation**
+
+1. Use a newer version of solidty, and a `uint256` instead of a `uint64` for `PuppyRaffle::totalFees`.
+2. Another option is to use the `SafeMath` library from OpenZeppelin for version 0.7.6 of solidity, however you would still have an issue with the `uint64` type if too many fees are collected.
+3. Remove the contract balance check to total fees in `PuppyRaffle:withdraw`:
+```diff
+-    require(address(this).balance == uint256(totalFees), "PuppyRaffle: There are currently players active!");
+```
+
+There are more attack vectors with that final require, so we recommend removing it regardless.
+
+
+### [H-4] If a player is refunded, they keep their place in the `PuppyRaffle::players` array meaning the `PuppyRaffle::totalAmountCollected` is incorrect.
+
+**Description**
+
+When a player calls `PuppyRaffle::refund`, the `PuppyRaffle::players` array updates this player's address to zero. This means the lenght of the `PuppyRaffle::players` array is unchanged and therefore the following line of code overcpimts the totalAmountCollected:
+
+```javascript
+        uint256 totalAmountCollected = players.length * entranceFee;
+```
+
+**Impact**
+
+When the `PuppyRaffle::totalAmountCollected` variable calculates
+incorrectly, the `PuppyRaffle::prizePool` and the `PuppyRaffle::fee` variables also calculate incorrectly due to the following code in `PuppyRaffle::selectWinner`:
+
+```javascript
+        uint256 prizePool = (totalAmountCollected * 80) / 100;
+        uint256 fee = (totalAmountCollected * 20) / 100;
+```
+
+This results in an incorrect prizePool and incorrect fee accounting.
+
+If enough players have refunded, the `PuppyRaffle::selectWinner` function will revert because it will attempt to send the winner more funds than what is available in the prize pool:
+
+```javascript
+        (bool success,) = winner.call{value: prizePool}("");
+```
+
+
+**Proof of Concept**
+
+Please add the following test case to `PuppyRaffleTest.t.sol` to see an example when four players enter the raffle and a single player refunds.
+
+The `PuppyRaffle::selectWinner` function attempts to send the winner:
+
+(80/100) x 4 x `PuppyRaffle::EntranceFee` = 3.2 x `PuppyRaffle::EntranceFee`
+
+But only has:
+
+(3/4) x 4 x `PuppyRaffle::EntranceFee` = 3 x `PuppyRaffle::EntranceFee` available.
+
+<details>
+<summary>Code</summary>
+
+```javascript
+    function testRefundedPlayerResultsInIncorrectFeesAndPayout() public playersEntered {
+        //Refund a player
+        vm.prank(playerOne);
+        puppyRaffle.refund(0);
+        
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        //In the following function call, the contract will revert due to the contract not having enough funds to pay the winner
+        puppyRaffle.selectWinner();
+    }
+```
+
+</details>
+
+
+**Recommended Mitigation**
+
+The `totalAmountCollected` variable needs to calculate based off the number of valid entries at the time `PuppyRaffle::selectWinner` is executed, not the length of the `PuppyRaffle.player` array.
+
+
+### [H-5] If a player is refunded, they keep their place in the `PuppyRaffle::players` array meaning they are eligible to win the raffle. ERC721 tokens cannot be minted to a zero address.
+
+**Description**
+
+When a player calls `PuppyRaffle::refund`, the `PuppyRaffle::players` array updates this player's address to zero. This means they are still eligible to win as the current logic selects any element in the array to be the winner of the raffle.
+
+**Impact**
+
+If the zero-address entry is selected to win the raffle, the `PuppyRaffle::selectWinner` function will attempt to mint an ERC721 token to a zero-address. This will revert.
+
+Additionally, this is unfair to other players who have not refunded their entry, as their chance of winning is diluted by refunded entries.
+
+**Proof of Concept**
+
+Please add the following test case to `PuppyRaffleTest.t.sol` to see an example when four players enter the raffle, and all four players refund their entry.
+
+<details>
+<summary>Code</summary>
+
+```javascript
+    function testRefundedPlayedWinsRaffleAndCannotMintNft() public playersEntered {
+
+        //Refund all four players in the raffle
+        vm.prank(playerOne);
+        puppyRaffle.refund(0);
+        
+        vm.prank(playerTwo);
+        puppyRaffle.refund(1);
+
+        vm.prank(playerThree);
+        puppyRaffle.refund(2);
+        
+        vm.prank(playerFour);
+        puppyRaffle.refund(3);
+
+        console.log("Player at index 0", puppyRaffle.players(0));
+        console.log("Player at index 1", puppyRaffle.players(1));
+        console.log("Player at index 2", puppyRaffle.players(2));
+        console.log("Player at index 3", puppyRaffle.players(3));
+
+        //There is currently no players in the raffle, lets pick a winner
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+        
+        //In order to not revert due to the contract not having enough funds, manually give the contract funds:
+        vm.deal(address(puppyRaffle), 4*entranceFee);
+
+        puppyRaffle.selectWinner();
+    }
+```
+
+</details>
+
+**Recommended Mitigation**
+
+When fixing [H-2] we need to adjust the selection of the winner so it's not possible for a refunded player to win the raffle.
+
+
+### [M-1] Unbounded loop checking for duplicates in `PuppyRaffle::enterRaffle` is a potential denial of service (DOS) attack, incrementing gas costs for future entrants 
 
 **Description**
 
@@ -275,6 +514,38 @@ There are a few recommendations:
 (https://docs.openzeppelin.com/contracts/3.x/api/utils#EnumerableSet)
 
 
+### [M-2] Unsafe cast of `PuppyRaffle:fee` loses fees
+
+See writeup in H-3
+
+
+### [M-3] Smart contract wallet raffle winners without a `receive` or a `fallback` function will block the start of a new contest
+
+**Description**
+
+The `PuppyRaffle::selectWinner` function is responsible for resetting the lottery. However, if the winner is a smart contract wallet that rejects payment, the lottery would not be able to restart.
+
+Users could call the `selectWinner` function again and non-wallet entrants could enter, but it could cost a lot due to the duplicate check and a lottery reset could get challenging.
+
+**Impact**
+
+The `PuppyRaffle::selectWinner` function could revert many times, making a lottery reset difficult.
+
+Also, the true winners would not get paid out and someone else could take their money!
+
+**Proof of Concept**
+
+1. 10 smart contract wallets enter the lottery without a `fallback` or `receive` function.
+2. The lottery ends
+3. The `selectWinner` function wouldn't work, even though the lottery is over!
+
+**Recommended Mitigation**
+
+1. Do not allow smart contract wallet entrants (not recommended).
+2. Create a mapping of addresses -> payout so winners can pull their funds out themselves with a `claimPrize` function, putting the owness on the winner to claim their prize (recommended).
+
+
+
 ### [L-1]: `PuppyRaffle::getActivePlayerIndex` returns 0 for non-existent players and for the player at index 0. This causes the player at index 0 to incorrectly think they have not entered the raffle
 
 **Description**
@@ -361,6 +632,53 @@ It's best to follow CEI (checks, effects, interactions)
 +       (bool success,) = winner.call{value: prizePool}(""); 
 +        require(success, "PuppyRaffle: Failed to send prize pool to winner"); 
 ```
+
+### [I-5]: Use of "magic" numbers is discouraged
+
+It can be confusing to see number literals in a codebase. It's more readable if the numbers are given a name.
+
+Examples:
+```javascript
+        uint256 prizePool = (totalAmountCollected * 80) / 100;
+        uint256 fee = (totalAmountCollected * 20) / 100;
+```
+
+Instead, these numbers could be replaced by variables:
+
+```javascript
+        uint256 public constant PRIZE_POOL_PERCENTAGE = 80;
+        uint256 public constant FEE_PERCENTAGE = 20;
+        uint256 public constant POOL_PRECISION = 100;
+```
+
+### [I-6]: State changes are mising events
+
+It is best practice to emit an event everytime the state of a contract is updated.
+
+
+### [I-7]: Event is missing indexed fields
+
+Index event fields make the field more quickly accessible to off-chain tools that parse events. However, note that each index field costs extra gas during emission, so it's not necessarily best to index the maximum allowed per event (three fields). Each event should use three indexed fields if there are three or more fields, and gas usage is not particularly of concern for the events in question. If there are fewer than three fields, all of the fields should be indexed.
+
+- Found in src/PuppyRaffle.sol [Line: 60](src/PuppyRaffle.sol#L60)
+
+	```solidity
+	    event RaffleEnter(address[] newPlayers);
+	```
+
+- Found in src/PuppyRaffle.sol [Line: 61](src/PuppyRaffle.sol#L61)
+
+	```solidity
+	    event RaffleRefunded(address player);
+	```
+
+- Found in src/PuppyRaffle.sol [Line: 62](src/PuppyRaffle.sol#L62)
+
+	```solidity
+	    event FeeAddressChanged(address newFeeAddress);
+
+
+### [I-8]: `PuppyRaffle::_isActivePlayer` is never used and should be removed
 
 
 ### [G-1]: Unchanged state variables should be declared constant or immutable
