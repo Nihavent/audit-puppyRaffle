@@ -274,10 +274,11 @@ contract PuppyRaffleTest is Test {
         address attackUser = makeAddr("attackUser");
         vm.deal(attackUser, 1 ether);
 
+        uint256 startingAttackUserBalance = attackUser.balance;
         uint256 startingAttackContractBalance = address(attackerContract).balance;
         uint256 startingPuppyContractBalance = address(puppyRaffle).balance;
 
-        console.log("startingAttackerAddressBalance: ", attackUser.balance);
+        console.log("startingAttackUserBalance: ", startingAttackUserBalance);
         console.log("startingAttackContractBalance: ", startingAttackContractBalance);
         console.log("startingPuppyContractBalance: ", startingPuppyContractBalance);
 
@@ -287,6 +288,12 @@ contract PuppyRaffleTest is Test {
         console.log("EndingAtackerAddressBalance: ", attackUser.balance);
         console.log("endingAttackContractBalance: ", address(attackerContract).balance);
         console.log("endingPuppyContractBalance: ", address(puppyRaffle).balance);
+
+        console.log(address(attackerContract).balance);
+        console.log(startingAttackContractBalance);
+        console.log(startingPuppyContractBalance);
+        //Show that the attacker has all the funds
+        assert(address(attackerContract).balance == startingAttackUserBalance + startingPuppyContractBalance);
     }
 
     
@@ -342,9 +349,7 @@ contract PuppyRaffleTest is Test {
         //800000000000000000
         //18400000000000000000
         //153255926290448384
-
     }
-
 }
 
 

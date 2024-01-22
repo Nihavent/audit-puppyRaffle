@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.7.6;
+// @report-written use of floating pragma is bad practice, recommend to use fixed version
+// @report-written why are you using 0.7.x, use newer version
 
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -21,6 +23,8 @@ contract PuppyRaffle is ERC721, Ownable {
     uint256 public immutable entranceFee;
     
     address[] public players;
+
+    //@report-written this should be immutable to save gas
     uint256 public raffleDuration;
     uint256 public raffleStartTime;
     address public previousWinner;
@@ -35,21 +39,25 @@ contract PuppyRaffle is ERC721, Ownable {
     mapping(uint256 => string) public rarityToName;
 
     // Stats for the common puppy (pug)
+    //@report-written should be constant
     string private commonImageUri = "ipfs://QmSsYRx3LpDAb1GZQm7zZ1AuHZjfbPkD6J7s9r41xu1mf8";
     uint256 public constant COMMON_RARITY = 70;
     string private constant COMMON = "common";
 
     // Stats for the rare puppy (st. bernard)
+    //@report-written should be constant
     string private rareImageUri = "ipfs://QmUPjADFGEKmfohdTaNcWhp7VGk26h5jXDA7v3VtTnTLcW";
     uint256 public constant RARE_RARITY = 25;
     string private constant RARE = "rare";
 
     // Stats for the legendary puppy (shiba inu)
+    //@report-written should be constant
     string private legendaryImageUri = "ipfs://QmYx6GsYAKnNzZ9A6NvEKV9nf1VaDzJrqDR23Y8YSkebLU";
     uint256 public constant LEGENDARY_RARITY = 5;
     string private constant LEGENDARY = "legendary";
 
     // Events
+    //@audit-info no indexed fields (Aderyn)
     event RaffleEnter(address[] newPlayers);
     event RaffleRefunded(address player);
     event FeeAddressChanged(address newFeeAddress);
@@ -59,6 +67,7 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @param _raffleDuration the duration in seconds of the raffle
     constructor(uint256 _entranceFee, address _feeAddress, uint256 _raffleDuration) ERC721("Puppy Raffle", "PR") {
         entranceFee = _entranceFee;
+        //@report-written check for zero address, input validation
         feeAddress = _feeAddress;
         raffleDuration = _raffleDuration;
         raffleStartTime = block.timestamp;
@@ -79,7 +88,8 @@ contract PuppyRaffle is ERC721, Ownable {
     function enterRaffle(address[] memory newPlayers) public payable {
         // q - were custom reverts avaialble in this version of solidity?
         // q - what if msg.value is zero?
-        // @audit - this should check if an addres entered is a zero address -  you cannot mint erc721 to a zero address    
+        // @audit - this should check if an address entered is a zero address -  you cannot mint erc721 to a zero address    
+        // @report-written -gas use uint256 playerLength instead of players.length, as this is calling data from storage twice in this function 
         require(msg.value == entranceFee * newPlayers.length, "PuppyRaffle: Must send enough to enter raffle");
         for (uint256 i = 0; i < newPlayers.length; i++) {
             // q what resets the players array?
@@ -87,30 +97,33 @@ contract PuppyRaffle is ERC721, Ownable {
         }
 
         // Check for duplicates
-        // @audit DOS Attack
+        // @report-written DOS Attack
         for (uint256 i = 0; i < players.length - 1; i++) { //@audit seems like an inefficient way to check for duplicates
             for (uint256 j = i + 1; j < players.length; j++) {
                 require(players[i] != players[j], "PuppyRaffle: Duplicate player");
             }
         }
+        //@audit - If an empty array is submitted this will emit an empty event
         emit RaffleEnter(newPlayers);
     }
 
     /// @param playerIndex the index of the player to refund. You can find it externally by calling `getActivePlayerIndex`
     /// @dev This function will allow there to be blank spots in the array
 
-    // @audit - reentrancy vulnerability due to this function sending a balance before the player is removed from the array.
-    // @audit -   if the player is a contract, they can call this function and re-enter the raffle before they are removed from the array (using their fallback() or receive() function)
+    // @report-written - reentrancy vulnerability due to this function sending a balance before the player is removed from the array.
+    // @report-written -   if the player is a contract, they can call this function and re-enter the raffle before they are removed from the array (using their fallback() or receive() function)
+    // @audit - if an address is changed to zero, can this address still win the raffle?
     function refund(uint256 playerIndex) public {
         // @audit MEV
         address playerAddress = players[playerIndex];
         require(playerAddress == msg.sender, "PuppyRaffle: Only the player can refund");
         require(playerAddress != address(0), "PuppyRaffle: Player already refunded, or is not active");
 
-        //@audit - makes external call before updates state
+        //@report-written- makes external call before updates state
         payable(msg.sender).sendValue(entranceFee);
 
         players[playerIndex] = address(0); //@audit - note when a player is refunded they keep their place in the array, conttributing to array length.
+        //@report-written  event emitted after call
         emit RaffleRefunded(playerAddress);
     }
 
@@ -123,8 +136,7 @@ contract PuppyRaffle is ERC721, Ownable {
                 return i;
             }
         }
-        // q what if a player is at index 0?
-        // @audit if the player is at index 0, this returns 0 and a player might think they're not active.
+        // @report-written if the player is at index 0, this returns 0 and a player might think they're not active.
         return 0;
     }
 
@@ -135,17 +147,21 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @dev we reset the active players array after the winner is selected
     /// @dev we send 80% of the funds to the winner, the other 20% goes to the feeAddress
 
+    // @audit - recommend to follow CEI
     // @audit - who calls this function? Should it by called by a Chainlink automated job?
     function selectWinner() external {
         // q - are the raffle duration and start time being set correctly?
         require(block.timestamp >= raffleStartTime + raffleDuration, "PuppyRaffle: Raffle not over");
         require(players.length >= 4, "PuppyRaffle: Need at least 4 players"); // @audit - this checks length of array, but not length of array excluding zero addresses (refunded entrants)
         
-        // @audit - weak RNG
+        // @audit - weak RNG, fixes Chainlink VRF, Commit Reveal Scheme
+        // @audit - picks a winner from the players array, but the winner can still be a zero adress (either refunded player or entered zero address)
         uint256 winnerIndex =
             uint256(keccak256(abi.encodePacked(msg.sender, block.timestamp, block.difficulty))) % players.length; // I'm not sure this is actually random, we could use Chainlink VRF instead
         address winner = players[winnerIndex];
         uint256 totalAmountCollected = players.length * entranceFee; // @audit - This will overcount if there are refunded players
+        //@audit - probably some precision loss here
+        //@audit-info magic numbers are bad practice
         uint256 prizePool = (totalAmountCollected * 80) / 100;
         uint256 fee = (totalAmountCollected * 20) / 100;
         //@audit - overflow when this value exceeds 2^64, with an entrance fee of 1e18, this will overflow after 2^64 / (0.2 * 1e18) ~ 93 players
@@ -182,13 +198,12 @@ contract PuppyRaffle is ERC721, Ownable {
     // @audit - should this be external?
     // @audit - who should be able to call this function?
     function withdrawFees() external { 
-        //q - if the protocol has players, someone can't withdraw fees?
-        //@audit - is it difficult to withdraw fees?
         //@audit - mishandling ether can lead to a DoS attack, if someone can send funds to this contract without the totalFees variable being updated, then the contract will be unable to withdraw fees.
         require(address(this).balance == uint256(totalFees), "PuppyRaffle: There are currently players active!");
         uint256 feesToWithdraw = totalFees;
         totalFees = 0;
         //@audit - what if the feeAddress is a smart contract with a fallback that will fail?
+        //slither-disable-next-line arbitrary-send-eth
         (bool success,) = feeAddress.call{value: feesToWithdraw}("");
         require(success, "PuppyRaffle: Failed to withdraw fees");
     }
@@ -196,12 +211,14 @@ contract PuppyRaffle is ERC721, Ownable {
     /// @notice only the owner of the contract can change the feeAddress
     /// @param newFeeAddress the new address to send fees to
     function changeFeeAddress(address newFeeAddress) external onlyOwner {
+        //@audit-info check for zero address, input validation
         feeAddress = newFeeAddress;
+        //@audit - are we missing events in other functions?
         emit FeeAddressChanged(newFeeAddress);
     }
 
     /// @notice this function will return true if the msg.sender is an active player
-    // @audit - is this function necessary?
+    // @audit - this isn't used anywaywhere, is it necessary?
     function _isActivePlayer() internal view returns (bool) {
         for (uint256 i = 0; i < players.length; i++) {
             if (players[i] == msg.sender) {
